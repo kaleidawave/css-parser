@@ -1,4 +1,5 @@
-use tokenizer_lib::{ParseError, Span, Token, TokenSender};
+use super::{ParseError, Span};
+use tokenizer_lib::{Token, TokenSender};
 
 #[derive(PartialEq, Eq, Debug)]
 pub enum CSSToken {
@@ -7,12 +8,14 @@ pub enum CSSToken {
     CloseCurly,
     Colon,
     SemiColon,
+    /// END of source
+    EOS,
 }
 
 /// Lexes the source returning CSSToken sequence
 pub fn lex_source(
     source: &String,
-    sender: &mut impl TokenSender<CSSToken>,
+    sender: &mut impl TokenSender<CSSToken, Span>,
 ) -> Result<(), ParseError> {
     #[derive(PartialEq)]
     enum ParsingState {
@@ -20,15 +23,33 @@ pub fn lex_source(
         None,
     }
 
-    let mut start = 0;
-
+    let mut line_start = 1;
+    let mut line_end = line_start;
+    let mut column_start = 1;
+    let mut column_end = column_start;
     let mut state = ParsingState::None;
+    let mut last = 0;
 
     for (idx, chr) in source.char_indices() {
+        if chr == '\n' {
+            line_end += 1;
+            column_end = 0;
+        }
+
         macro_rules! set_state {
             ($s:expr) => {{
-                start = idx;
+                last = idx;
+                line_start = line_end;
+                column_start = column_end;
                 state = $s;
+            }};
+        }
+        macro_rules! push_token {
+            ($t:expr) => {{
+                sender.push(Token(
+                    $t,
+                    Span(line_start, column_start, line_end, column_end),
+                ));
             }};
         }
 
@@ -36,10 +57,7 @@ pub fn lex_source(
             ParsingState::Ident => match chr {
                 'A'..='Z' | 'a'..='z' | '0'..='9' | '-' => {}
                 _ => {
-                    sender.push(Token(
-                        CSSToken::Ident(source[start..idx].to_owned()),
-                        Span(start, idx),
-                    ));
+                    push_token!(CSSToken::Ident(source[last..idx].to_owned()));
                     set_state!(ParsingState::None);
                 }
             },
@@ -51,6 +69,8 @@ pub fn lex_source(
                 'A'..='Z' | 'a'..='z' => set_state!(ParsingState::Ident),
                 chr => {
                     if chr.is_whitespace() {
+                        column_end += chr.len_utf16();
+                        column_start = column_end;
                         continue;
                     }
                     let token = match chr {
@@ -60,11 +80,22 @@ pub fn lex_source(
                         ';' => CSSToken::SemiColon,
                         chr => unimplemented!("Invalid character '{}'", chr),
                     };
-                    sender.push(Token(token, Span(idx, idx + 1)));
+                    column_end += chr.len_utf16();
+                    push_token!(token);
+                    continue;
                 }
             }
         }
+
+        if chr != '\n' {
+            column_end += chr.len_utf16();
+        }
     }
+
+    sender.push(Token(
+        CSSToken::EOS,
+        Span(line_end, column_end, line_end, column_end),
+    ));
 
     Ok(())
 }

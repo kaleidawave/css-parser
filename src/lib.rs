@@ -3,9 +3,33 @@
 //! Simple CSS parser and "renderer"
 
 mod lexer;
-use tokenizer_lib::{ParseError, get_streamed_token_channel, StaticTokenChannel, Span, TokenReader, Token};
-use lexer::CSSToken;
+use tokenizer_lib::{StreamedTokenChannel, StaticTokenChannel, TokenReader, Token};
+pub use lexer::{lex_source, CSSToken};
 use std::thread;
+
+/// Position of token, line_start, column_start, line_end, column_end, 
+/// could do filename..? pub Arc<String>
+#[derive(Debug)]
+pub struct Span(pub usize, pub usize, pub usize, pub usize);
+
+#[derive(Debug)]
+pub struct ParseError {
+    reason: String,
+    position: Span
+}
+
+impl From<Option<(CSSToken, Token<CSSToken, Span>)>> for ParseError {
+    fn from(opt: Option<(CSSToken, Token<CSSToken, Span>)>) -> Self {
+        if let Some((expected_type, invalid_token)) = opt {
+            Self {
+                reason: format!("Expected '{:?}' found '{:?}'", expected_type, invalid_token.0),
+                position: invalid_token.1
+            }
+        } else {
+            unreachable!()
+        }
+    }
+}
 
 /// Settings for rendering ASTNodes to CSS
 pub struct ToStringSettings {
@@ -37,18 +61,22 @@ pub trait ASTNode: Sized {
     #[cfg(not(target_arch = "wasm32"))]
     fn from_string(string: String) -> Result<Self, ParseError> {
         if string.len() > 2048 {
-            let (mut sender, mut reader) = get_streamed_token_channel();
+            let (mut sender, mut reader) = StreamedTokenChannel::new();
             let parse_source_thread =
                 thread::spawn(move || lexer::lex_source(&string, &mut sender));
 
-            Self::from_reader(&mut reader).and_then(|val| {
+            let this = Self::from_reader(&mut reader).and_then(|val| {
                 // Checks script parsing did not throw
                 parse_source_thread.join().unwrap().and(Ok(val))
-            })
+            });
+            reader.expect_next(CSSToken::EOS)?;
+            this
         } else {
             let mut reader = StaticTokenChannel::new();
             lexer::lex_source(&string, &mut reader)?;
-            Self::from_reader(&mut reader)
+            let this = Self::from_reader(&mut reader);
+            reader.expect_next(CSSToken::EOS)?;
+            this
         }
     }
 
@@ -57,13 +85,15 @@ pub trait ASTNode: Sized {
     fn from_string(string: String) -> Result<Self, ParseError> {
         let mut reader = StaticTokenChannel::new();
         lexer::lex_source(&string, &mut reader)?;
-        Self::from_reader(&mut reader)
+        let this = Self::from_reader(&mut reader);
+        reader.expect_next(CSSToken::EOS)?;
+        this
     }
 
     /// Returns position of node as span **as it was parsed**. May be invalid or none after mutation
     fn get_position(&self) -> Option<&Span>;
 
-    fn from_reader(reader: &mut impl TokenReader<CSSToken>) -> Result<Self, ParseError>;
+    fn from_reader(reader: &mut impl TokenReader<CSSToken, Span>) -> Result<Self, ParseError>;
 
     fn to_string_from_buffer(&self, buf: &mut String, settings: &ToStringSettings, depth: u8);
 
@@ -75,23 +105,18 @@ pub trait ASTNode: Sized {
     }
 }
 
-pub(crate) fn expected_token_err() -> ParseError {
-    ParseError {
-        reason: String::from("Expected token, found end"),
-        position: None,
-    }
-}
-
 /// A css rule with a selector and collection of declarations
 #[derive(Debug)]
 pub struct Rule {
     selector: Selector,
-    declarations: Vec<(String, String)>
+    declarations: Vec<(String, String)>,
+    position: Option<Span>
 }
 
 impl ASTNode for Rule {
-    fn from_reader(reader: &mut impl TokenReader<CSSToken>) -> Result<Self, ParseError> {
+    fn from_reader(reader: &mut impl TokenReader<CSSToken, Span>) -> Result<Self, ParseError> {
         let selector = Selector::from_reader(reader)?;
+        let Span(line_start, column_start, ..) = selector.get_position().unwrap();
         reader.expect_next(CSSToken::OpenCurly)?;
         let mut declarations: Vec<(String, String)> = Vec::new();
         while let Some(Token(token_type, _)) = reader.peek() {
@@ -110,14 +135,15 @@ impl ASTNode for Rule {
                 panic!()
             };
             declarations.push((property, value));
-            if CSSToken::SemiColon != reader.next().ok_or_else(expected_token_err)?.0 {
+            if CSSToken::SemiColon != reader.next().unwrap().0 {
                 break;
             }
         }
-        reader.expect_next(CSSToken::CloseCurly)?;
+        let Span(.., line_end, column_end) = reader.expect_next(CSSToken::CloseCurly)?;
         Ok(Self {
+            position: Some(Span(*line_start, *column_start, line_end, column_end)),
             selector,
-            declarations
+            declarations,
         })
     }
 
@@ -148,47 +174,49 @@ impl ASTNode for Rule {
     }
 
     fn get_position(&self) -> Option<&Span> {
-        unimplemented!()
+        self.position.as_ref()
     }
 }
 
 /// [A css selector](https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_Selectors)
 #[derive(Debug)]
 pub enum Selector {
-    TagName(String),
+    TagName(String, Option<Span>),
 }
 
 impl ASTNode for Selector {
-    fn from_reader(reader: &mut impl TokenReader<CSSToken>) -> Result<Self, ParseError> {
-        match reader.next().ok_or_else(expected_token_err)? {
-            Token(CSSToken::Ident(name), _pos) => Ok(Self::TagName(name)),
-            token => panic!("Invalid token {:#?}", token)
+    fn from_reader(reader: &mut impl TokenReader<CSSToken, Span>) -> Result<Self, ParseError> {
+        match reader.next().unwrap() {
+            Token(CSSToken::Ident(name), pos) => Ok(Self::TagName(name, Some(pos))),
+            Token(token, _) => panic!("Invalid token {:?}", token)
         }
     }
 
     fn to_string_from_buffer(&self, buf: &mut String, _settings: &ToStringSettings, _depth: u8) {
         match self {
-            Self::TagName(name) => {
+            Self::TagName(name, _pos) => {
                 buf.push_str(&name);
             }
         }
     }
 
     fn get_position(&self) -> Option<&Span> {
-        unimplemented!()
+        match self {
+            Self::TagName(_, position) => position.as_ref()
+        }
     }
 }
 
-/// A Stylesheet with a collection of rules
+/// A StyleSheet with a collection of rules
 #[derive(Debug)]
 pub struct StyleSheet {
     pub rules: Vec<Rule>
 }
 
 impl ASTNode for StyleSheet {
-    fn from_reader(reader: &mut impl TokenReader<CSSToken>) -> Result<Self, ParseError> {
+    fn from_reader(reader: &mut impl TokenReader<CSSToken, Span>) -> Result<Self, ParseError> {
         let mut rules: Vec<Rule> = Vec::new();
-        while reader.peek().is_some() {
+        while reader.peek().is_some() && reader.peek().unwrap().0 != CSSToken::EOS {
             rules.push(Rule::from_reader(reader)?);
         }
         Ok(Self { rules })
@@ -214,14 +242,14 @@ mod tests {
 
     #[test]
     fn parsing_rules() {
-        let stylesheet = StyleSheet::from_string(include_str!("../examples/example1.css").to_owned()).unwrap();
-        assert_eq!(stylesheet.rules.len(), 2);
+        let style_sheet = StyleSheet::from_string(include_str!("../examples/example1.css").to_owned()).unwrap();
+        assert_eq!(style_sheet.rules.len(), 2);
     }
 
     #[test]
-    fn stylesheet_to_string() {
+    fn style_sheet_to_string() {
         let source = include_str!("../examples/example1.css").to_owned();
-        let stylesheet = StyleSheet::from_string(source.clone()).unwrap();
-        assert_eq!(stylesheet.to_string(&ToStringSettings::default()), source.replace('\r', ""));
+        let style_sheet = StyleSheet::from_string(source.clone()).unwrap();
+        assert_eq!(style_sheet.to_string(&ToStringSettings::default()), source.replace('\r', ""));
     }
 }
