@@ -8,6 +8,11 @@ pub enum CSSToken {
     CloseCurly,
     Colon,
     SemiColon,
+    Dot,
+    HashTag,
+    CloseAngle,
+    Comma,
+    Asterisk,
     /// END of source
     EOS,
 }
@@ -78,6 +83,11 @@ pub fn lex_source(
                         '}' => CSSToken::CloseCurly,
                         ':' => CSSToken::Colon,
                         ';' => CSSToken::SemiColon,
+                        ',' => CSSToken::Comma,
+                        '>' => CSSToken::CloseAngle,
+                        '#' => CSSToken::HashTag,
+                        '.' => CSSToken::Dot,
+                        '*' => CSSToken::Asterisk,
                         chr => unimplemented!("Invalid character '{}'", chr),
                     };
                     column_end += chr.len_utf16();
@@ -90,6 +100,13 @@ pub fn lex_source(
         if chr != '\n' {
             column_end += chr.len_utf16();
         }
+    }
+
+    if state == ParsingState::Ident {
+        sender.push(Token(
+            CSSToken::Ident(source[last..].to_owned()),
+            Span(line_start, column_start, line_end, column_end),
+        ));
     }
 
     sender.push(Token(

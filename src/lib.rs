@@ -6,18 +6,26 @@ mod lexer;
 pub use lexer::{lex_source, CSSToken};
 mod source_map;
 pub use source_map::SourceMap;
+mod selectors;
+pub use selectors::Selector;
 use std::{thread, cell::RefCell};
 use tokenizer_lib::{StaticTokenChannel, StreamedTokenChannel, Token, TokenReader};
 
 /// Position of token, line_start, column_start, line_end, column_end,
 /// could do filename..? pub Arc<String>
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Span(pub usize, pub usize, pub usize, pub usize);
+
+impl Span {
+    pub fn is_adjacent(&self, other: &Self) -> bool {
+        self.2 == other.0 && self.3 == other.1
+    }
+}
 
 #[derive(Debug)]
 pub struct ParseError {
-    reason: String,
-    position: Span,
+    pub reason: String,
+    pub position: Span,
 }
 
 impl From<Option<(CSSToken, Token<CSSToken, Span>)>> for ParseError {
@@ -61,21 +69,32 @@ impl ToStringSettings {
     }
 }
 
-fn push_to_buffer(buf: &mut String, source_map: &Option<RefCell<SourceMap>>, value: &String) {
+pub(crate) fn token_as_ident(token: Token<CSSToken, Span>) -> Result<(String, Span), ParseError> {
+    if let CSSToken::Ident(val) = token.0 {
+        Ok((val, token.1))
+    } else {
+        Err(ParseError {
+            reason: format!("Expected ident found '{:?}'", token.0),
+            position: token.1
+        })
+    }
+}
+
+pub(crate) fn push_to_buffer(buf: &mut String, source_map: &Option<RefCell<SourceMap>>, value: &String) {
     if let Some(source_map) = source_map {
         source_map.borrow_mut().add_to_column(value.len());
     }
     buf.push_str(value);
 }
 
-fn push_char_to_buffer(buf: &mut String, source_map: &Option<RefCell<SourceMap>>, chr: char) {
+pub(crate) fn push_char_to_buffer(buf: &mut String, source_map: &Option<RefCell<SourceMap>>, chr: char) {
     if let Some(source_map) = source_map {
         source_map.borrow_mut().add_to_column(chr.len_utf16());
     }
     buf.push(chr);
 }
 
-fn push_new_line(buf: &mut String, source_map: &Option<RefCell<SourceMap>>) {
+pub(crate) fn push_new_line(buf: &mut String, source_map: &Option<RefCell<SourceMap>>) {
     buf.push('\n');
     if let Some(source_map) = source_map {
         source_map.borrow_mut().add_new_line();
@@ -226,44 +245,6 @@ impl ASTNode for Rule {
 
     fn get_position(&self) -> Option<&Span> {
         self.position.as_ref()
-    }
-}
-
-/// [A css selector](https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_Selectors)
-#[derive(Debug)]
-pub enum Selector {
-    TagName(String, Option<Span>),
-}
-
-impl ASTNode for Selector {
-    fn from_reader(reader: &mut impl TokenReader<CSSToken, Span>) -> Result<Self, ParseError> {
-        match reader.next().unwrap() {
-            Token(CSSToken::Ident(name), pos) => Ok(Self::TagName(name, Some(pos))),
-            Token(token, _) => panic!("Invalid token {:?}", token),
-        }
-    }
-
-    fn to_string_from_buffer(
-        &self,
-        buf: &mut String,
-        _settings: &ToStringSettings,
-        _depth: u8,
-        source_map: &Option<RefCell<SourceMap>>,
-    ) {
-        match self {
-            Self::TagName(name, pos) => {
-                if let (Some(source_map), Some(pos)) = (source_map, pos) {
-                    source_map.borrow_mut().add_mapping(pos.0, pos.1);
-                }
-                push_to_buffer(buf, source_map, &name);
-            }
-        }
-    }
-
-    fn get_position(&self) -> Option<&Span> {
-        match self {
-            Self::TagName(_, position) => position.as_ref(),
-        }
     }
 }
 
