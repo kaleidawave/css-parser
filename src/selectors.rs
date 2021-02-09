@@ -6,7 +6,7 @@ use std::{boxed::Box, cell::RefCell};
 use tokenizer_lib::{Token, TokenReader};
 
 /// [A css selector](https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_Selectors)
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Selector {
     /// Can be '*' for universal
     tag_name: Option<String>,
@@ -160,6 +160,26 @@ impl ASTNode for Selector {
 
     fn get_position(&self) -> Option<&Span> {
         self.position.as_ref()
+    }
+}
+
+impl Selector {
+    /// Returns other nested under self
+    pub fn nest_selector(&self, other: Self) -> Self {
+        let mut new_selector = self.clone();
+        // Walk down the new selector descendant and child branches until at end. Then set descendant value 
+        // on the tail. Uses raw pointers & unsafe due to issues with Rust borrow checker
+        let mut tail: *mut Selector = &mut new_selector;
+        loop {
+            let cur = unsafe { &mut *tail };
+            if let Some(child) = cur.descendant.as_mut().or(cur.child.as_mut()) {
+                tail = &mut **child;
+            } else {
+                cur.descendant = Some(Box::new(other));
+                break;
+            }
+        }
+        new_selector
     }
 }
 

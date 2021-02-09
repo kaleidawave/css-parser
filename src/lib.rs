@@ -8,12 +8,12 @@ mod source_map;
 pub use source_map::SourceMap;
 mod selectors;
 pub use selectors::Selector;
-use std::{thread, cell::RefCell};
+use std::{cell::RefCell, thread};
 use tokenizer_lib::{StaticTokenChannel, StreamedTokenChannel, Token, TokenReader};
 
 /// Position of token, line_start, column_start, line_end, column_end,
 /// could do filename..? pub Arc<String>
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Span(pub usize, pub usize, pub usize, pub usize);
 
 impl Span {
@@ -75,19 +75,27 @@ pub(crate) fn token_as_ident(token: Token<CSSToken, Span>) -> Result<(String, Sp
     } else {
         Err(ParseError {
             reason: format!("Expected ident found '{:?}'", token.0),
-            position: token.1
+            position: token.1,
         })
     }
 }
 
-pub(crate) fn push_to_buffer(buf: &mut String, source_map: &Option<RefCell<SourceMap>>, value: &String) {
+pub(crate) fn push_to_buffer(
+    buf: &mut String,
+    source_map: &Option<RefCell<SourceMap>>,
+    value: &String,
+) {
     if let Some(source_map) = source_map {
         source_map.borrow_mut().add_to_column(value.len());
     }
     buf.push_str(value);
 }
 
-pub(crate) fn push_char_to_buffer(buf: &mut String, source_map: &Option<RefCell<SourceMap>>, chr: char) {
+pub(crate) fn push_char_to_buffer(
+    buf: &mut String,
+    source_map: &Option<RefCell<SourceMap>>,
+    chr: char,
+) {
     if let Some(source_map) = source_map {
         source_map.borrow_mut().add_to_column(chr.len_utf16());
     }
@@ -150,7 +158,11 @@ pub trait ASTNode: Sized {
     );
 
     /// Returns structure as valid string. If `SourceMap` passed will add mappings to SourceMap
-    fn to_string(&self, settings: &ToStringSettings, source_map: &Option<RefCell<SourceMap>>) -> String {
+    fn to_string(
+        &self,
+        settings: &ToStringSettings,
+        source_map: &Option<RefCell<SourceMap>>,
+    ) -> String {
         let mut buf = String::new();
         self.to_string_from_buffer(&mut buf, settings, 0, source_map);
         buf
@@ -161,18 +173,9 @@ pub trait ASTNode: Sized {
 #[derive(Debug)]
 pub struct Rule {
     selector: Selector,
+    nested_rules: Option<Vec<Rule>>,
     declarations: Vec<(String, String)>,
     position: Option<Span>,
-}
-
-impl Rule {
-    pub fn new(selector: Selector, declarations: Vec<(String, String)>) -> Self {
-        Self {
-            selector,
-            declarations,
-            position: None
-        }
-    }
 }
 
 impl ASTNode for Rule {
@@ -181,24 +184,39 @@ impl ASTNode for Rule {
         let Span(line_start, column_start, ..) = selector.get_position().unwrap();
         reader.expect_next(CSSToken::OpenCurly)?;
         let mut declarations: Vec<(String, String)> = Vec::new();
+        let mut nested_rules: Option<Vec<Rule>> = None;
         while let Some(Token(token_type, _)) = reader.peek() {
             if token_type == &CSSToken::CloseCurly {
                 break;
             }
-            let property = if let Some(Token(CSSToken::Ident(name), _)) = reader.next() {
-                name
+            let mut is_rule: Option<bool> = None;
+            reader.scan(|token| {
+                match token {
+                    CSSToken::Colon => is_rule = Some(false),
+                    CSSToken::OpenCurly => is_rule = Some(true),
+                    _ => {}
+                }
+                is_rule.is_some()
+            });
+
+            if is_rule.unwrap_or(false) {
+                nested_rules.get_or_insert_with(|| Vec::new()).push(Rule::from_reader(reader)?);
             } else {
-                panic!()
-            };
-            reader.expect_next(CSSToken::Colon)?;
-            let value = if let Some(Token(CSSToken::Ident(name), _)) = reader.next() {
-                name
-            } else {
-                panic!()
-            };
-            declarations.push((property, value));
-            if CSSToken::SemiColon != reader.next().unwrap().0 {
-                break;
+                let property = if let Some(Token(CSSToken::Ident(name), _)) = reader.next() {
+                    name
+                } else {
+                    panic!()
+                };
+                reader.expect_next(CSSToken::Colon)?;
+                let value = if let Some(Token(CSSToken::Ident(name), _)) = reader.next() {
+                    name
+                } else {
+                    panic!()
+                };
+                declarations.push((property, value));
+                if CSSToken::SemiColon != reader.next().unwrap().0 {
+                    break;
+                }
             }
         }
         let Span(.., line_end, column_end) = reader.expect_next(CSSToken::CloseCurly)?;
@@ -206,6 +224,7 @@ impl ASTNode for Rule {
             position: Some(Span(*line_start, *column_start, line_end, column_end)),
             selector,
             declarations,
+            nested_rules
         })
     }
 
@@ -225,7 +244,11 @@ impl ASTNode for Rule {
         for (idx, (name, value)) in self.declarations.iter().enumerate() {
             if !settings.minify {
                 push_new_line(buf, source_map);
-                push_to_buffer(buf, source_map, &settings.indent_with.repeat(depth as usize + 1));
+                push_to_buffer(
+                    buf,
+                    source_map,
+                    &settings.indent_with.repeat(depth as usize + 1),
+                );
             }
             push_to_buffer(buf, source_map, name);
             push_char_to_buffer(buf, source_map, ':');
@@ -237,7 +260,11 @@ impl ASTNode for Rule {
             push_char_to_buffer(buf, source_map, ';');
             if !settings.minify && idx == self.declarations.len() - 1 {
                 push_new_line(buf, source_map);
-                push_to_buffer(buf, source_map, &settings.indent_with.repeat(depth as usize));
+                push_to_buffer(
+                    buf,
+                    source_map,
+                    &settings.indent_with.repeat(depth as usize),
+                );
             }
         }
         push_char_to_buffer(buf, source_map, '}');
@@ -281,6 +308,26 @@ impl ASTNode for StyleSheet {
 
     fn get_position(&self) -> Option<&Span> {
         unimplemented!()
+    }
+}
+
+/// Will "raise" or "unnest" rules in the stylesheet. Mutates StyleSheet
+pub fn raise_rules(style_sheet: &mut StyleSheet) {
+    let mut raised_rules: Vec<Rule> = Vec::new();
+    for rule in style_sheet.rules.iter_mut() {
+        raise_subrules(rule, &mut raised_rules);
+    }
+    style_sheet.rules.append(&mut raised_rules);
+}
+
+/// Will remove nested rules leaving declarations in place 
+fn raise_subrules(rule: &mut Rule, raised_rules: &mut Vec<Rule>) {
+    if let Some(nested_rules) = &mut rule.nested_rules {
+        for mut nested_rule in nested_rules.drain(..) {
+            nested_rule.selector = rule.selector.nest_selector(nested_rule.selector);
+            raise_subrules(&mut nested_rule, raised_rules);
+            raised_rules.push(nested_rule);
+        }
     }
 }
 
