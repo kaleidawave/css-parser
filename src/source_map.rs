@@ -1,3 +1,6 @@
+use super::SOURCE_IDS;
+use std::collections::HashMap;
+
 const BASE64_ALPHABET: &'static [u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -29,7 +32,9 @@ pub struct SourceMap {
     column: u8,
     // The last a mapping was added to. Used to decide whether to add segment separator ','
     last_line: u8,
-    sources: Vec<(String, Option<String>)>, //
+    sources: Vec<(String, Option<String>)>,
+    /// Maps source ids to position in sources vector
+    sources_map: HashMap<u8, u8>
 }
 
 impl SourceMap {
@@ -41,18 +46,29 @@ impl SourceMap {
             // should be -1 but usize, if 0 or any other may confuse that initial starts of on A line
             last_line: u8::MAX, 
             sources: Vec::new(),
+            sources_map: HashMap::new()
         }
     }
 
     /// Original line and original column are one indexed
-    pub fn add_mapping(&mut self, original_line: usize, original_column: usize) {
+    pub fn add_mapping(&mut self, original_line: usize, original_column: usize, source_id: u8) {
         if self.last_line == self.line {
             self.buf.push(',');
         }
         self.last_line = self.line;
         
         vlq_encode_integer_to_buffer(&mut self.buf, self.column.into());
-        self.buf.push('A');
+        if let Some(pos) = self.sources_map.get(&source_id) {
+            vlq_encode_integer_to_buffer(&mut self.buf, *pos as isize);
+        } else {
+            SOURCE_IDS.with(|s| {
+                let source_name = s.borrow().get(&source_id).unwrap().clone();
+                self.sources.push(source_name);
+                let idx = (self.sources.len() - 1) as u8;
+                self.sources_map.insert(source_id, idx);
+                vlq_encode_integer_to_buffer(&mut self.buf, idx as isize);
+            });
+        }
         vlq_encode_integer_to_buffer(&mut self.buf, original_line as isize - 1);
         vlq_encode_integer_to_buffer(&mut self.buf, original_column as isize  - 1);
     }
@@ -77,11 +93,11 @@ impl SourceMap {
         let mut source_contents = String::new();
         for (idx, (source_name, source_content)) in self.sources.iter().enumerate() {
             source_names.push('"');
-            source_names.push_str(source_name);
+            source_names.push_str(&source_name.replace('\\', "\\\\"));
             source_names.push('"');
             source_contents.push('"');
             if let Some(content) = &source_content {
-                source_contents.push_str(&content.replace('\n', "\\n")); // TODO \r ..?
+                source_contents.push_str(&content.replace('\n', "\\n").replace('\r', "")); 
             }
             source_contents.push('"');
             if idx < self.sources.len() - 1 {

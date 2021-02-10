@@ -8,13 +8,23 @@ mod source_map;
 pub use source_map::SourceMap;
 mod selectors;
 pub use selectors::Selector;
-use std::{cell::RefCell, thread};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    path::Path,
+    sync::atomic::{AtomicU8, Ordering},
+    thread,
+};
 use tokenizer_lib::{StaticTokenChannel, StreamedTokenChannel, Token, TokenReader};
 
-/// Position of token, line_start, column_start, line_end, column_end,
-/// could do filename..? pub Arc<String>
+thread_local! {
+    pub static SOURCE_IDS: RefCell<HashMap<u8, (String, Option<String>)>> = RefCell::new(HashMap::new());
+}
+static SOURCE_ID_COUNTER: AtomicU8 = AtomicU8::new(0);
+
+/// Position of token, line_start, column_start, line_end, column_end, source_id
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub struct Span(pub usize, pub usize, pub usize, pub usize);
+pub struct Span(pub usize, pub usize, pub usize, pub usize, pub u8);
 
 impl Span {
     pub fn is_adjacent(&self, other: &Self) -> bool {
@@ -48,6 +58,7 @@ impl From<Option<(CSSToken, Token<CSSToken, Span>)>> for ParseError {
 pub struct ToStringSettings {
     pub minify: bool,
     pub indent_with: String,
+    pub generate_source_map: bool,
 }
 
 impl std::default::Default for ToStringSettings {
@@ -55,6 +66,7 @@ impl std::default::Default for ToStringSettings {
         ToStringSettings {
             minify: false,
             indent_with: "    ".to_owned(),
+            generate_source_map: false,
         }
     }
 }
@@ -65,6 +77,7 @@ impl ToStringSettings {
         ToStringSettings {
             minify: true,
             indent_with: "".to_owned(),
+            generate_source_map: false,
         }
     }
 }
@@ -80,32 +93,34 @@ pub(crate) fn token_as_ident(token: Token<CSSToken, Span>) -> Result<(String, Sp
     }
 }
 
-pub(crate) fn push_to_buffer(
-    buf: &mut String,
-    source_map: &Option<RefCell<SourceMap>>,
-    value: &String,
-) {
-    if let Some(source_map) = source_map {
-        source_map.borrow_mut().add_to_column(value.len());
-    }
-    buf.push_str(value);
-}
+pub struct ToStringer<'a>(pub &'a mut String, pub &'a mut Option<SourceMap>);
 
-pub(crate) fn push_char_to_buffer(
-    buf: &mut String,
-    source_map: &Option<RefCell<SourceMap>>,
-    chr: char,
-) {
-    if let Some(source_map) = source_map {
-        source_map.borrow_mut().add_to_column(chr.len_utf16());
+impl ToStringer<'_> {
+    pub fn push(&mut self, chr: char) {
+        if let Some(ref mut source_map) = self.1 {
+            source_map.add_to_column(chr.len_utf16());
+        }
+        self.0.push(chr);
     }
-    buf.push(chr);
-}
 
-pub(crate) fn push_new_line(buf: &mut String, source_map: &Option<RefCell<SourceMap>>) {
-    buf.push('\n');
-    if let Some(source_map) = source_map {
-        source_map.borrow_mut().add_new_line();
+    pub fn push_new_line(&mut self) {
+        if let Some(ref mut source_map) = self.1 {
+            source_map.add_new_line();
+        }
+        self.0.push('\n');
+    }
+
+    pub fn push_str(&mut self, slice: &str) {
+        if let Some(ref mut source_map) = self.1 {
+            source_map.add_to_column(slice.len()); // TODO slice.chars().count() ..?
+        }
+        self.0.push_str(slice);
+    }
+
+    pub fn add_mapping(&mut self, original_line: usize, original_column: usize, source_id: u8) {
+        if let Some(ref mut source_map) = self.1 {
+            source_map.add_mapping(original_line, original_column, source_id);
+        }
     }
 }
 
@@ -115,8 +130,9 @@ pub trait ASTNode: Sized {
     fn from_string(string: String) -> Result<Self, ParseError> {
         if string.len() > 2048 {
             let (mut sender, mut reader) = StreamedTokenChannel::new();
-            let parse_source_thread =
-                thread::spawn(move || lexer::lex_source(&string, &mut sender));
+            let parse_source_thread = thread::spawn(move || {
+                lexer::lex_source(&string, 0, &mut sender)
+            });
 
             let this = Self::from_reader(&mut reader).and_then(|val| {
                 // Checks script parsing did not throw
@@ -126,7 +142,7 @@ pub trait ASTNode: Sized {
             this
         } else {
             let mut reader = StaticTokenChannel::new();
-            lexer::lex_source(&string, &mut reader)?;
+            lexer::lex_source(&string, 0, &mut reader)?;
             let this = Self::from_reader(&mut reader);
             reader.expect_next(CSSToken::EOS)?;
             this
@@ -151,21 +167,22 @@ pub trait ASTNode: Sized {
     /// Depth indicates the indentation of current block
     fn to_string_from_buffer(
         &self,
-        buf: &mut String,
+        buf: &mut ToStringer<'_>,
         settings: &ToStringSettings,
         depth: u8,
-        source_map: &Option<RefCell<SourceMap>>,
     );
 
     /// Returns structure as valid string. If `SourceMap` passed will add mappings to SourceMap
-    fn to_string(
-        &self,
-        settings: &ToStringSettings,
-        source_map: &Option<RefCell<SourceMap>>,
-    ) -> String {
-        let mut buf = String::new();
-        self.to_string_from_buffer(&mut buf, settings, 0, source_map);
-        buf
+    fn to_string(&self, settings: &ToStringSettings) -> (String, Option<SourceMap>) {
+        let mut buffer = String::new();
+        let mut source_map = if settings.generate_source_map {
+            Some(SourceMap::new())
+        } else {
+            None
+        };
+        let mut to_stringer = ToStringer(&mut buffer, &mut source_map);
+        self.to_string_from_buffer(&mut to_stringer, settings, 0);
+        (buffer, source_map)
     }
 }
 
@@ -200,7 +217,9 @@ impl ASTNode for Rule {
             });
 
             if is_rule.unwrap_or(false) {
-                nested_rules.get_or_insert_with(|| Vec::new()).push(Rule::from_reader(reader)?);
+                nested_rules
+                    .get_or_insert_with(|| Vec::new())
+                    .push(Rule::from_reader(reader)?);
             } else {
                 let property = if let Some(Token(CSSToken::Ident(name), _)) = reader.next() {
                     name
@@ -219,55 +238,45 @@ impl ASTNode for Rule {
                 }
             }
         }
-        let Span(.., line_end, column_end) = reader.expect_next(CSSToken::CloseCurly)?;
+        let Span(.., line_end, column_end, id) = reader.expect_next(CSSToken::CloseCurly)?;
         Ok(Self {
-            position: Some(Span(*line_start, *column_start, line_end, column_end)),
+            position: Some(Span(*line_start, *column_start, line_end, column_end, id)),
             selector,
             declarations,
-            nested_rules
+            nested_rules,
         })
     }
 
     fn to_string_from_buffer(
         &self,
-        buf: &mut String,
+        buf: &mut ToStringer<'_>,
         settings: &ToStringSettings,
         depth: u8,
-        source_map: &Option<RefCell<SourceMap>>,
     ) {
-        self.selector
-            .to_string_from_buffer(buf, settings, depth, source_map);
+        self.selector.to_string_from_buffer(buf, settings, depth);
         if !settings.minify {
-            push_char_to_buffer(buf, source_map, ' ');
+            buf.push(' ');
         }
-        push_char_to_buffer(buf, source_map, '{');
+        buf.push('{');
         for (idx, (name, value)) in self.declarations.iter().enumerate() {
             if !settings.minify {
-                push_new_line(buf, source_map);
-                push_to_buffer(
-                    buf,
-                    source_map,
-                    &settings.indent_with.repeat(depth as usize + 1),
-                );
+                buf.push_new_line();
+                buf.push_str(&settings.indent_with.repeat(depth as usize + 1));
             }
-            push_to_buffer(buf, source_map, name);
-            push_char_to_buffer(buf, source_map, ':');
+            buf.push_str(name);
+            buf.push(':');
 
             if !settings.minify {
-                push_char_to_buffer(buf, source_map, ' ');
+                buf.push(' ');
             }
-            push_to_buffer(buf, source_map, value);
-            push_char_to_buffer(buf, source_map, ';');
+            buf.push_str(value);
+            buf.push(';');
             if !settings.minify && idx == self.declarations.len() - 1 {
-                push_new_line(buf, source_map);
-                push_to_buffer(
-                    buf,
-                    source_map,
-                    &settings.indent_with.repeat(depth as usize),
-                );
+                buf.push_new_line();
+                buf.push_str(&settings.indent_with.repeat(depth as usize));
             }
         }
-        push_char_to_buffer(buf, source_map, '}');
+        buf.push('}');
     }
 
     fn get_position(&self) -> Option<&Span> {
@@ -292,22 +301,49 @@ impl ASTNode for StyleSheet {
 
     fn to_string_from_buffer(
         &self,
-        buf: &mut String,
+        buf: &mut ToStringer<'_>,
         settings: &ToStringSettings,
         _depth: u8,
-        source_map: &Option<RefCell<SourceMap>>,
     ) {
         for (idx, rule) in self.rules.iter().enumerate() {
-            rule.to_string_from_buffer(buf, settings, 0, source_map);
+            rule.to_string_from_buffer(buf, settings, 0);
             if !settings.minify && idx + 1 < self.rules.len() {
-                push_new_line(buf, source_map);
-                push_new_line(buf, source_map);
+                buf.push_new_line();
+                buf.push_new_line();
             }
         }
     }
 
     fn get_position(&self) -> Option<&Span> {
         unimplemented!()
+    }
+}
+
+impl StyleSheet {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn from_path(path: &Path, display_name: &String) -> Result<Self, ParseError> {
+        use std::fs;
+        let source = fs::read_to_string(path.clone()).unwrap();
+        let (mut sender, mut reader) = StreamedTokenChannel::new();
+        let source_id = SOURCE_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+        SOURCE_IDS.with(|map| {
+            map.borrow_mut().insert(
+                source_id,
+                (
+                    display_name.clone(),
+                    Some(source.clone())
+                ),
+            );
+        });
+        let parse_source_thread =
+            thread::spawn(move || lexer::lex_source(&source, source_id, &mut sender));
+
+        let this = Self::from_reader(&mut reader).and_then(|val| {
+            // Checks script parsing did not throw
+            parse_source_thread.join().unwrap().and(Ok(val))
+        });
+        reader.expect_next(CSSToken::EOS)?;
+        this
     }
 }
 
@@ -320,7 +356,7 @@ pub fn raise_rules(style_sheet: &mut StyleSheet) {
     style_sheet.rules.append(&mut raised_rules);
 }
 
-/// Will remove nested rules leaving declarations in place 
+/// Will remove nested rules leaving declarations in place
 fn raise_subrules(rule: &mut Rule, raised_rules: &mut Vec<Rule>) {
     if let Some(nested_rules) = &mut rule.nested_rules {
         for mut nested_rule in nested_rules.drain(..) {
@@ -347,7 +383,7 @@ mod tests {
         let source = include_str!("../examples/example1.css").to_owned();
         let style_sheet = StyleSheet::from_string(source.clone()).unwrap();
         assert_eq!(
-            style_sheet.to_string(&ToStringSettings::default(), &None),
+            style_sheet.to_string(&ToStringSettings::default()).0,
             source.replace('\r', "")
         );
     }

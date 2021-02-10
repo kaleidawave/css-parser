@@ -1,8 +1,5 @@
-use super::{
-    push_char_to_buffer, push_to_buffer, token_as_ident, ASTNode, CSSToken, ParseError, SourceMap,
-    Span, ToStringSettings,
-};
-use std::{boxed::Box, cell::RefCell};
+use super::{token_as_ident, ASTNode, CSSToken, ParseError, Span, ToStringSettings, ToStringer};
+use std::boxed::Box;
 use tokenizer_lib::{Token, TokenReader};
 
 /// [A css selector](https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_Selectors)
@@ -34,7 +31,10 @@ impl ASTNode for Selector {
         for i in 0.. {
             // Handling "descendant" parsing by checking gap/space in tokens
             let peek = reader.peek().unwrap();
-            if i != 0 && peek.0 != CSSToken::CloseAngle && !selector.position.as_ref().unwrap().is_adjacent(&peek.1) {
+            if i != 0
+                && peek.0 != CSSToken::CloseAngle
+                && !selector.position.as_ref().unwrap().is_adjacent(&peek.1)
+            {
                 let descendant = Self::from_reader(reader)?;
                 selector.position.as_mut().unwrap().2 = descendant.get_position().unwrap().2;
                 selector.position.as_mut().unwrap().3 = descendant.get_position().unwrap().3;
@@ -60,43 +60,43 @@ impl ASTNode for Selector {
                     }
                     selector.position = Some(pos);
                 }
-                Token(CSSToken::Dot, Span(ls, cs, _, _)) => {
-                    let (name, Span(_, _, le, ce)) = token_as_ident(reader.next().unwrap())?;
+                Token(CSSToken::Dot, Span(ls, cs, _, _, _)) => {
+                    let (name, Span(_, _, le, ce, id)) = token_as_ident(reader.next().unwrap())?;
                     selector
                         .class_names
                         .get_or_insert_with(|| Vec::new())
                         .push(name);
-                    if let Some(Span(_, _, ref mut ole, ref mut oce)) = &mut selector.position {
+                    if let Some(Span(_, _, ref mut ole, ref mut oce, _)) = &mut selector.position {
                         *ole = le;
                         *oce = ce;
                     } else {
-                        selector.position = Some(Span(ls, cs, le, ce));
+                        selector.position = Some(Span(ls, cs, le, ce, id));
                     }
                 }
-                Token(CSSToken::HashTag, Span(ls, cs, _, _)) => {
-                    let (name, Span(_, _, le, ce)) = token_as_ident(reader.next().unwrap())?;
+                Token(CSSToken::HashTag, Span(ls, cs, _, _, _)) => {
+                    let (name, Span(_, _, le, ce, id)) = token_as_ident(reader.next().unwrap())?;
                     if let Some(_) = selector.identifier.replace(name) {
                         return Err(ParseError {
                             reason: "Cannot specify to id selectors".to_owned(),
-                            position: Span(ls, cs, le, ce),
+                            position: Span(ls, cs, le, ce, id),
                         });
                     }
-                    if let Some(Span(_, _, ref mut ole, ref mut oce)) = &mut selector.position {
+                    if let Some(Span(_, _, ref mut ole, ref mut oce, _)) = &mut selector.position {
                         *ole = le;
                         *oce = ce;
                     } else {
-                        selector.position = Some(Span(ls, cs, le, ce));
+                        selector.position = Some(Span(ls, cs, le, ce, id));
                     }
                 }
                 Token(CSSToken::CloseAngle, position) => {
                     let child = Self::from_reader(reader)?;
-                    if let Some(Span(_, _, ref mut ole, ref mut oce)) = &mut selector.position {
+                    if let Some(Span(_, _, ref mut ole, ref mut oce, _)) = &mut selector.position {
                         *ole = child.get_position().unwrap().2;
                         *oce = child.get_position().unwrap().3;
                     } else {
                         return Err(ParseError {
                             reason: "Expected selector start, found '>'".to_owned(),
-                            position
+                            position,
                         });
                     }
                     selector.child = Some(Box::new(child));
@@ -119,41 +119,40 @@ impl ASTNode for Selector {
 
     fn to_string_from_buffer(
         &self,
-        buf: &mut String,
+        buf: &mut ToStringer<'_>,
         settings: &ToStringSettings,
         depth: u8,
-        source_map: &Option<RefCell<SourceMap>>,
     ) {
-        if let (Some(source_map), Some(pos)) = (source_map, &self.position) {
-            source_map.borrow_mut().add_mapping(pos.0, pos.1);
+        if let Some(pos) = &self.position {
+            buf.add_mapping(pos.0, pos.1, pos.4);
         }
         if let Some(name) = &self.tag_name {
-            push_to_buffer(buf, source_map, name);
+            buf.push_str(name);
         }
         if let Some(id) = &self.identifier {
-            push_char_to_buffer(buf, source_map, '#');
-            push_to_buffer(buf, source_map, id);
+            buf.push('#');
+            buf.push_str(id);
         }
         if let Some(class_names) = &self.class_names {
             for class_name in class_names.iter() {
-                push_char_to_buffer(buf, source_map, '.');
-                push_to_buffer(buf, source_map, class_name);
+                buf.push('.');
+                buf.push_str(class_name);
             }
         }
         if let Some(descendant) = &self.descendant {
-            push_char_to_buffer(buf, source_map, ' ');
-            descendant.to_string_from_buffer(buf, settings, depth, source_map);
+            buf.push(' ');
+            descendant.to_string_from_buffer(buf, settings, depth);
             return;
         }
         if let Some(child) = &self.child {
             if !settings.minify {
-                push_char_to_buffer(buf, source_map, ' ');
+                buf.push(' ');
             }
-            push_char_to_buffer(buf, source_map, '>');
+            buf.push('>');
             if !settings.minify {
-                push_char_to_buffer(buf, source_map, ' ');
+                buf.push(' ');
             }
-            child.to_string_from_buffer(buf, settings, depth, source_map);
+            child.to_string_from_buffer(buf, settings, depth);
             return;
         }
     }
@@ -167,7 +166,7 @@ impl Selector {
     /// Returns other nested under self
     pub fn nest_selector(&self, other: Self) -> Self {
         let mut new_selector = self.clone();
-        // Walk down the new selector descendant and child branches until at end. Then set descendant value 
+        // Walk down the new selector descendant and child branches until at end. Then set descendant value
         // on the tail. Uses raw pointers & unsafe due to issues with Rust borrow checker
         let mut tail: *mut Selector = &mut new_selector;
         loop {
@@ -212,7 +211,10 @@ mod selector_tests {
         let selector = Selector::from_string("div .button".to_owned()).unwrap();
         assert_eq!(selector.tag_name, Some("div".to_owned()));
         let descendant_selector = *selector.descendant.unwrap();
-        assert_eq!(descendant_selector.class_names.unwrap()[0], "button".to_owned());
+        assert_eq!(
+            descendant_selector.class_names.unwrap()[0],
+            "button".to_owned()
+        );
     }
 
     #[test]

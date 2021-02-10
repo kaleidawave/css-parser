@@ -21,6 +21,7 @@ pub enum CSSToken {
 /// Lexes the source returning CSSToken sequence
 pub fn lex_source(
     source: &String,
+    source_id: u8,    
     sender: &mut impl TokenSender<CSSToken, Span>,
 ) -> Result<(), ParseError> {
     #[derive(PartialEq)]
@@ -40,7 +41,7 @@ pub fn lex_source(
 
     macro_rules! current_position {
         () => {
-            Span(line_end, column_end, line_end, column_end)
+            Span(line_end, column_end, line_end, column_end, source_id)
         };
     }
 
@@ -61,7 +62,7 @@ pub fn lex_source(
             ($t:expr) => {{
                 sender.push(Token(
                     $t,
-                    Span(line_start, column_start, line_end, column_end),
+                    Span(line_start, column_start, line_end, column_end, source_id),
                 ));
             }};
         }
@@ -145,13 +146,13 @@ pub fn lex_source(
     if state == ParsingState::Ident {
         sender.push(Token(
             CSSToken::Ident(source[start..].to_owned()),
-            Span(line_start, column_start, line_end, column_end),
+            Span(line_start, column_start, line_end, column_end, source_id),
         ));
     }
 
     sender.push(Token(
         CSSToken::EOS,
-        Span(line_end, column_end, line_end, column_end),
+        Span(line_end, column_end, line_end, column_end, source_id),
     ));
 
     Ok(())
