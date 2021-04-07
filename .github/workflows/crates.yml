@@ -16,13 +16,10 @@ jobs:
       - uses: actions/setup-node@v1
       - name: Run update script
         id: script
-        with:
-          version: ${{ github.event.inputs.version }}
         run: |
-          cd .github/scripts
           npm install
-          npm run start
-          cd ../..
+          npm run start -- ${{ github.event.inputs.version }}
+        working-directory: ./.github/scripts 
       - name: Publish on crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

@@ -7,7 +7,7 @@ const path = require("path");
 try {
     const cargoTomlFile = path.join(process.env.GITHUB_WORKSPACE, "Cargo.toml");
     const cargoToml = toml.parse(fs.readFileSync(cargoTomlFile).toString());
-    const versionInput = core.getInput("version", {required: true});
+    const versionInput = process.argv[2] ?? core.getInput("version", {required: true});
     let version;
     switch (versionInput.toLowerCase()) {
         case "major":
