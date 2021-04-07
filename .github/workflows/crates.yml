@@ -16,6 +16,8 @@ jobs:
       - uses: actions/setup-node@v1
       - name: Run update script
         id: script
+        with:
+          version: ${{ github.event.inputs.version }}
         run: |
           cd .github/scripts
           npm install
@@ -30,5 +32,6 @@ jobs:
           git config user.name github-actions
           git config user.email github-actions@github.com
           git add .
+          git tag "v${{ steps.script.outputs.newVersion }}"
           git commit -m "Release: ${{ steps.script.outputs.newVersion }}"
           git push

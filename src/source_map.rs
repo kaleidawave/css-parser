@@ -85,16 +85,6 @@ impl SourceMap {
             vlq_encode_integer_to_buffer(buf, idx as isize);
         }
         // Original line and column with offset
-        println!(
-            "({}, {}) @ ({}, {}) VLQ: ({}, {}) LC {}",
-            self.line + 1,
-            self.column,
-            original_line,
-            original_column,
-            original_line as isize - 1 - self.last_source_line as isize,
-            original_column as isize - self.last_source_column as isize,
-            self.last_column
-        );
         vlq_encode_integer_to_buffer(
             buf,
             original_line as isize - 1 - self.last_source_line as isize,

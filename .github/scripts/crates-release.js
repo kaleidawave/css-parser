@@ -8,7 +8,6 @@ try {
     const cargoTomlFile = path.join(process.env.GITHUB_WORKSPACE, "Cargo.toml");
     const cargoToml = toml.parse(fs.readFileSync(cargoTomlFile).toString());
     const versionInput = core.getInput("version", {required: true});
-    console.log(JSON.stringify({cargoToml, versionInput}));
     let version;
     switch (versionInput.toLowerCase()) {
         case "major":
