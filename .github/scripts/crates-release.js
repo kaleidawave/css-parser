@@ -3,9 +3,10 @@ const github = require('@actions/github');
 const toml = require('@iarna/toml');
 const semver = require('semver');
 const fs = require('fs');
+const path = require("path");
 
 try {
-    const cargoTomlFile = "Cargo.toml";
+    const cargoTomlFile = path.join(process.env.GITHUB_WORKSPACE, "Cargo.toml");
     const cargoToml = toml.parse(fs.readFileSync(cargoTomlFile).toString());
     const versionInput = core.getInput("version").toLowerCase();
     let version;
