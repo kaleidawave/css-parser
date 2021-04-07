@@ -18,6 +18,9 @@ pub enum CSSToken {
     EOS,
 }
 
+const LINE_START: usize = 1;
+const COLUMN_START: usize = 0;
+
 /// Lexes the source returning CSSToken sequence
 pub fn lex_source(
     source: &String,
@@ -33,10 +36,10 @@ pub fn lex_source(
 
     let mut state = ParsingState::None;
 
-    // Used for the position of tokens
-    let mut line_start = 1;
+    // Used for the position of tokens. Line is one based, column is 0 based
+    let mut line_start = LINE_START;
     let mut line_end = line_start;
-    let mut column_start = 1;
+    let mut column_start = COLUMN_START;
     let mut column_end = column_start;
 
     macro_rules! current_position {
@@ -100,7 +103,7 @@ pub fn lex_source(
                 chr if chr.is_whitespace() => {
                     if chr == '\n' {
                         line_end += 1;
-                        column_end = 1;
+                        column_end = COLUMN_START;
                     } else {
                         column_end += chr.len_utf16();
                         column_start = column_end;
@@ -137,7 +140,7 @@ pub fn lex_source(
 
         if chr == '\n' {
             line_end += 1;
-            column_end = 1;
+            column_end = COLUMN_START;
         } else {
             column_end += chr.len_utf16();
         }

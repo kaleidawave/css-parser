@@ -68,9 +68,9 @@ dependencies = [
 
 [[package]]
 name = "tokenizer-lib"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17771d6af639962b205aab79c157ab7ea5d2a285d3db83bfeb379266530f1f39"
+checksum = "b485b102ea8386604b493ba5cf62047ba3781bed833c223df0db3b250c03d1cd"
 
 [[package]]
 name = "unicode-width"

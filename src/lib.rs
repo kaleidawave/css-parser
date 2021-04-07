@@ -112,7 +112,7 @@ impl ToStringer<'_> {
 
     pub fn push_str(&mut self, slice: &str) {
         if let Some(ref mut source_map) = self.1 {
-            source_map.add_to_column(slice.len()); // TODO slice.chars().count() ..?
+            source_map.add_to_column(slice.chars().count());
         }
         self.0.push_str(slice);
     }

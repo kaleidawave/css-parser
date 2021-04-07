@@ -109,8 +109,10 @@ impl ASTNode for Selector {
                     });
                 }
             }
-            if matches!(reader.peek(), Some(Token(CSSToken::OpenCurly, _)) | Some(Token(CSSToken::EOS, _)))
-            {
+            if matches!(
+                reader.peek(),
+                Some(Token(CSSToken::OpenCurly, _)) | Some(Token(CSSToken::EOS, _))
+            ) {
                 break;
             }
         }
@@ -142,9 +144,7 @@ impl ASTNode for Selector {
         if let Some(descendant) = &self.descendant {
             buf.push(' ');
             descendant.to_string_from_buffer(buf, settings, depth);
-            return;
-        }
-        if let Some(child) = &self.child {
+        } else if let Some(child) = &self.child {
             if !settings.minify {
                 buf.push(' ');
             }
@@ -153,7 +153,6 @@ impl ASTNode for Selector {
                 buf.push(' ');
             }
             child.to_string_from_buffer(buf, settings, depth);
-            return;
         }
     }
 

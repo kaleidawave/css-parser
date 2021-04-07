@@ -14,11 +14,11 @@ fn vlq_encode_integer_to_buffer(buf: &mut String, mut value: isize) {
 
     loop {
         let mut clamped = value & 31;
-		value >>= 5;
-		if value > 0 {
-			clamped |= 32;
-		}
-		buf.push(BASE64_ALPHABET[clamped as usize] as char);
+        value >>= 5;
+        if value > 0 {
+            clamped |= 32;
+        }
+        buf.push(BASE64_ALPHABET[clamped as usize] as char);
         if value <= 0 {
             break;
         }
@@ -27,63 +27,99 @@ fn vlq_encode_integer_to_buffer(buf: &mut String, mut value: isize) {
 
 /// Struct for building a [source map (v3)](https://sourcemaps.info/spec.html)
 pub struct SourceMap {
+    /// The mappings as String
     buf: String,
-    line: u8,
+    /// Current line & column of the output
+    line: u16,
     column: u8,
-    // The last a mapping was added to. Used to decide whether to add segment separator ','
-    last_line: u8,
+    /// The last line a mapping was added to. Used to decide whether to add segment separator ','
+    last_line: Option<u16>,
+    last_column: isize,
+    /// The current position in source. Used for relativeness
+    last_source_line: u16,
+    last_source_column: isize,
     sources: Vec<(String, Option<String>)>,
     /// Maps source ids to position in sources vector
-    sources_map: HashMap<u8, u8>
+    sources_map: HashMap<u8, u8>,
 }
 
 impl SourceMap {
     pub fn new() -> Self {
         SourceMap {
             buf: String::new(),
-            line: 0, 
+            line: 0,
+            last_line: None,
             column: 0,
-            // should be -1 but usize, if 0 or any other may confuse that initial starts of on A line
-            last_line: u8::MAX, 
+            last_column: 0,
+            last_source_line: 0,
+            last_source_column: 0,
             sources: Vec::new(),
-            sources_map: HashMap::new()
+            sources_map: HashMap::new(),
         }
     }
 
     /// Original line and original column are one indexed
     pub fn add_mapping(&mut self, original_line: usize, original_column: usize, source_id: u8) {
-        if self.last_line == self.line {
-            self.buf.push(',');
-        }
-        self.last_line = self.line;
-        
-        vlq_encode_integer_to_buffer(&mut self.buf, self.column.into());
-        if let Some(pos) = self.sources_map.get(&source_id) {
-            vlq_encode_integer_to_buffer(&mut self.buf, *pos as isize);
+        if let Some(ref mut last_line) = self.last_line {
+            if *last_line == self.line {
+                self.buf.push(',');
+            }
+            *last_line = self.line;
         } else {
-            SOURCE_IDS.with(|s| {
-                let source_name = s.borrow().get(&source_id).unwrap().clone();
-                self.sources.push(source_name);
-                let idx = (self.sources.len() - 1) as u8;
-                self.sources_map.insert(source_id, idx);
-                vlq_encode_integer_to_buffer(&mut self.buf, idx as isize);
-            });
+            self.last_line = Some(self.line);
         }
-        vlq_encode_integer_to_buffer(&mut self.buf, original_line as isize - 1);
-        vlq_encode_integer_to_buffer(&mut self.buf, original_column as isize  - 1);
+        let buf = &mut self.buf;
+        // Add column - self.last_column as isize
+        let column_offset = self.column as isize - self.last_column as isize;
+        vlq_encode_integer_to_buffer(buf, column_offset);
+        // If the source in map
+        if let Some(idx) = self.sources_map.get(&source_id) {
+            vlq_encode_integer_to_buffer(buf, *idx as isize);
+        } else {
+            // Else get it from the global
+            let source_name = SOURCE_IDS.with(|s| s.borrow().get(&source_id).unwrap().clone());
+            // And add it to the map
+            self.sources.push(source_name);
+            let idx = (self.sources.len() - 1) as u8;
+            self.sources_map.insert(source_id, idx);
+            vlq_encode_integer_to_buffer(buf, idx as isize);
+        }
+        // Original line and column with offset
+        println!(
+            "({}, {}) @ ({}, {}) VLQ: ({}, {}) LC {}",
+            self.line + 1,
+            self.column,
+            original_line,
+            original_column,
+            original_line as isize - 1 - self.last_source_line as isize,
+            original_column as isize - self.last_source_column as isize,
+            self.last_column
+        );
+        vlq_encode_integer_to_buffer(
+            buf,
+            original_line as isize - 1 - self.last_source_line as isize,
+        );
+        vlq_encode_integer_to_buffer(
+            buf,
+            original_column as isize - self.last_source_column as isize,
+        );
+        self.last_source_line = original_line as u16 - 1;
+        self.last_source_column = original_column as isize;
+        self.last_column = self.column as isize;
     }
 
     pub fn add_new_line(&mut self) {
         self.line += 1;
         self.buf.push(';');
         self.column = 0;
+        self.last_column = 0;
     }
 
     pub fn add_to_column(&mut self, length: usize) {
         self.column += length as u8;
     }
 
-    /// TODO kinda temp
+    // TODO kinda temp
     pub fn add_source(&mut self, name: String, content: Option<String>) {
         self.sources.push((name, content))
     }
@@ -97,7 +133,7 @@ impl SourceMap {
             source_names.push('"');
             source_contents.push('"');
             if let Some(content) = &source_content {
-                source_contents.push_str(&content.replace('\n', "\\n").replace('\r', "")); 
+                source_contents.push_str(&content.replace('\n', "\\n").replace('\r', ""));
             }
             source_contents.push('"');
             if idx < self.sources.len() - 1 {
@@ -107,9 +143,7 @@ impl SourceMap {
         }
         format!(
             r#"{{"version":3,"sourceRoot":"","sources":[{}],"sourcesContent":[{}],"names":[],"mappings":"{}"}}"#,
-            source_names,
-            source_contents,
-            self.buf
+            source_names, source_contents, self.buf
         )
     }
 }
