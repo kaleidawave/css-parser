@@ -1,11 +1,11 @@
 [package]
 name = "css-parser"
 description = "CSS parser and compiler written in Rust. Can be used as standalone library or cli tool"
-version = "0.0.0"
+version = "0.1.0"
 authors = [ "kaleidawave <kaleidawave@gmail.com>" ]
 edition = "2018"
-keywords = ["css"]
-categories = ["compilers"]
+keywords = [ "css" ]
+categories = [ "compilers" ]
 repository = "https://github.com/kaleidawave/css-parser"
 license = "MIT"
 
