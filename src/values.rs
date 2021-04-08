@@ -175,6 +175,7 @@ mod test {
     test_value!(keyword, "block", CSSValue::Keyword("block".to_owned()));
     test_value!(color, "#00ff00", CSSValue::Color("00ff00".to_owned()));
     test_value!(number, "1", CSSValue::Number(Number("1".to_owned())));
+    test_value!(number_decimal_shorthand, ".2", CSSValue::Number(Number(".2".to_owned())));
     test_value!(
         percentage,
         "10%",

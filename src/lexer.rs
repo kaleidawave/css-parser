@@ -40,6 +40,8 @@ pub fn lex_source(
     enum ParsingState {
         Ident,
         Number,
+        /// Used to decide whether class identifier or number
+        Dot,
         String { escaped: bool },
         HashPrefixedValue,
         Comment { found_asterisk: bool },
@@ -97,6 +99,14 @@ pub fn lex_source(
                     set_state!(ParsingState::None);
                 }
             }
+            ParsingState::Dot => {
+                if matches!(chr, '0'..='9') {
+                    state = ParsingState::Number;
+                } else {
+                    push_token!(CSSToken::Dot);
+                    set_state!(ParsingState::Ident);
+                }
+            }
             ParsingState::Number => match chr {
                 '0'..='9' | '.' => {}
                 _ => {
@@ -137,6 +147,7 @@ pub fn lex_source(
                 '/' => set_state!(ParsingState::Comment {
                     found_asterisk: true
                 }),
+                '.' => set_state!(ParsingState::Dot),
                 '"' => set_state!(ParsingState::String { escaped: false} ),
                 '#' => set_state!(ParsingState::HashPrefixedValue),
                 '0'..='9' => set_state!(ParsingState::Number),
@@ -219,7 +230,14 @@ pub fn lex_source(
                 position: current_position!()
             })
         }
+        ParsingState::Dot => {
+            return Err(ParseError {
+                reason: "Found trailing \".\"".to_owned(),
+                position: current_position!()
+            })
+        }
         ParsingState::None => {}
+         
     }
 
     sender.push(Token(
