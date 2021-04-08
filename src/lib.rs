@@ -8,27 +8,55 @@ mod source_map;
 pub use source_map::SourceMap;
 mod selectors;
 pub use selectors::Selector;
+mod values;
+pub use values::CSSValue;
+mod rules;
+use lazy_static::lazy_static;
+pub use rules::Rule;
 use std::{
-    cell::RefCell,
     collections::HashMap,
     path::Path,
-    sync::atomic::{AtomicU8, Ordering},
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        RwLock,
+    },
     thread,
 };
 use tokenizer_lib::{StaticTokenChannel, StreamedTokenChannel, Token, TokenReader};
 
-thread_local! {
-    pub static SOURCE_IDS: RefCell<HashMap<u8, (String, Option<String>)>> = RefCell::new(HashMap::new());
+lazy_static! {
+    pub static ref SOURCE_IDS: RwLock<HashMap<SourceId, (String, Option<String>)>> =
+        RwLock::new(HashMap::new());
 }
-static SOURCE_ID_COUNTER: AtomicU8 = AtomicU8::new(0);
+
+static SOURCE_ID_COUNTER: AtomicU8 = AtomicU8::new(1);
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+pub struct SourceId(pub u8);
+
+impl SourceId {
+    fn new() -> Self {
+        Self(SOURCE_ID_COUNTER.fetch_add(1, Ordering::SeqCst))
+    }
+
+    fn null() -> Self {
+        Self(0)
+    }
+}
 
 /// Position of token, line_start, column_start, line_end, column_end, source_id
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub struct Span(pub usize, pub usize, pub usize, pub usize, pub u8);
+pub struct Span(pub usize, pub usize, pub usize, pub usize, pub SourceId);
 
 impl Span {
+    /// Returns whether the end of `self` is the start of `other`
     pub fn is_adjacent(&self, other: &Self) -> bool {
-        self.2 == other.0 && self.3 == other.1
+        self.4 == other.4 && self.2 == other.0 && self.3 == other.1
+    }
+
+    /// Returns a new `Span` which starts at the start of `self` a ends at the end of `other`
+    pub fn union(&self, other: &Self) -> Span {
+        Span(self.0, self.1, other.2, other.3, self.4.clone())
     }
 }
 
@@ -117,7 +145,24 @@ impl ToStringer<'_> {
         self.0.push_str(slice);
     }
 
-    pub fn add_mapping(&mut self, original_line: usize, original_column: usize, source_id: u8) {
+    /// Used to push slices that may contain new lines
+    pub fn push_str_contains_new_line(&mut self, slice: &str) {
+        if let Some(source_map) = self.1 {
+            for chr in slice.chars() {
+                if chr == '\n' {
+                    source_map.add_new_line()
+                }
+            }
+        }
+        self.0.push_str(slice);
+    }
+
+    pub fn add_mapping(
+        &mut self,
+        original_line: usize,
+        original_column: usize,
+        source_id: SourceId,
+    ) {
         if let Some(ref mut source_map) = self.1 {
             source_map.add_mapping(original_line, original_column, source_id);
         }
@@ -130,9 +175,8 @@ pub trait ASTNode: Sized {
     fn from_string(string: String) -> Result<Self, ParseError> {
         if string.len() > 2048 {
             let (mut sender, mut reader) = StreamedTokenChannel::new();
-            let parse_source_thread = thread::spawn(move || {
-                lexer::lex_source(&string, 0, &mut sender)
-            });
+            let parse_source_thread =
+                thread::spawn(move || lexer::lex_source(&string, SourceId::null(), &mut sender));
 
             let this = Self::from_reader(&mut reader).and_then(|val| {
                 // Checks script parsing did not throw
@@ -142,7 +186,7 @@ pub trait ASTNode: Sized {
             this
         } else {
             let mut reader = StaticTokenChannel::new();
-            lexer::lex_source(&string, 0, &mut reader)?;
+            lexer::lex_source(&string, SourceId::null(), &mut reader)?;
             let this = Self::from_reader(&mut reader);
             reader.expect_next(CSSToken::EOS)?;
             this
@@ -183,104 +227,6 @@ pub trait ASTNode: Sized {
         let mut to_stringer = ToStringer(&mut buffer, &mut source_map);
         self.to_string_from_buffer(&mut to_stringer, settings, 0);
         (buffer, source_map)
-    }
-}
-
-/// A css rule with a selector and collection of declarations
-#[derive(Debug)]
-pub struct Rule {
-    selector: Selector,
-    nested_rules: Option<Vec<Rule>>,
-    declarations: Vec<(String, String)>,
-    position: Option<Span>,
-}
-
-impl ASTNode for Rule {
-    fn from_reader(reader: &mut impl TokenReader<CSSToken, Span>) -> Result<Self, ParseError> {
-        let selector = Selector::from_reader(reader)?;
-        let Span(line_start, column_start, ..) = selector.get_position().unwrap();
-        reader.expect_next(CSSToken::OpenCurly)?;
-        let mut declarations: Vec<(String, String)> = Vec::new();
-        let mut nested_rules: Option<Vec<Rule>> = None;
-        while let Some(Token(token_type, _)) = reader.peek() {
-            if token_type == &CSSToken::CloseCurly {
-                break;
-            }
-            let mut is_rule: Option<bool> = None;
-            reader.scan(|token| {
-                match token {
-                    CSSToken::Colon => is_rule = Some(false),
-                    CSSToken::OpenCurly => is_rule = Some(true),
-                    _ => {}
-                }
-                is_rule.is_some()
-            });
-
-            if is_rule.unwrap_or(false) {
-                nested_rules
-                    .get_or_insert_with(|| Vec::new())
-                    .push(Rule::from_reader(reader)?);
-            } else {
-                let property = if let Some(Token(CSSToken::Ident(name), _)) = reader.next() {
-                    name
-                } else {
-                    panic!()
-                };
-                reader.expect_next(CSSToken::Colon)?;
-                let value = if let Some(Token(CSSToken::Ident(name), _)) = reader.next() {
-                    name
-                } else {
-                    panic!()
-                };
-                declarations.push((property, value));
-                if CSSToken::SemiColon != reader.next().unwrap().0 {
-                    break;
-                }
-            }
-        }
-        let Span(.., line_end, column_end, id) = reader.expect_next(CSSToken::CloseCurly)?;
-        Ok(Self {
-            position: Some(Span(*line_start, *column_start, line_end, column_end, id)),
-            selector,
-            declarations,
-            nested_rules,
-        })
-    }
-
-    fn to_string_from_buffer(
-        &self,
-        buf: &mut ToStringer<'_>,
-        settings: &ToStringSettings,
-        depth: u8,
-    ) {
-        self.selector.to_string_from_buffer(buf, settings, depth);
-        if !settings.minify {
-            buf.push(' ');
-        }
-        buf.push('{');
-        for (idx, (name, value)) in self.declarations.iter().enumerate() {
-            if !settings.minify {
-                buf.push_new_line();
-                buf.push_str(&settings.indent_with.repeat(depth as usize + 1));
-            }
-            buf.push_str(name);
-            buf.push(':');
-
-            if !settings.minify {
-                buf.push(' ');
-            }
-            buf.push_str(value);
-            buf.push(';');
-            if !settings.minify && idx == self.declarations.len() - 1 {
-                buf.push_new_line();
-                buf.push_str(&settings.indent_with.repeat(depth as usize));
-            }
-        }
-        buf.push('}');
-    }
-
-    fn get_position(&self) -> Option<&Span> {
-        self.position.as_ref()
     }
 }
 
@@ -325,16 +271,8 @@ impl StyleSheet {
         use std::fs;
         let source = fs::read_to_string(path.clone()).unwrap();
         let (mut sender, mut reader) = StreamedTokenChannel::new();
-        let source_id = SOURCE_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
-        SOURCE_IDS.with(|map| {
-            map.borrow_mut().insert(
-                source_id,
-                (
-                    display_name.clone(),
-                    Some(source.clone())
-                ),
-            );
-        });
+        let source_id = SourceId::new();
+        SOURCE_IDS.write().unwrap().insert(source_id, (display_name.clone(), Some(source.clone())));
         let parse_source_thread =
             thread::spawn(move || lexer::lex_source(&source, source_id, &mut sender));
 

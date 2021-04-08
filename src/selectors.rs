@@ -60,39 +60,35 @@ impl ASTNode for Selector {
                     }
                     selector.position = Some(pos);
                 }
-                Token(CSSToken::Dot, Span(ls, cs, _, _, _)) => {
-                    let (name, Span(_, _, le, ce, id)) = token_as_ident(reader.next().unwrap())?;
+                Token(CSSToken::Dot, start_span) => {
+                    let (name, end_span) = token_as_ident(reader.next().unwrap())?;
                     selector
                         .class_names
                         .get_or_insert_with(|| Vec::new())
                         .push(name);
-                    if let Some(Span(_, _, ref mut ole, ref mut oce, _)) = &mut selector.position {
-                        *ole = le;
-                        *oce = ce;
+                    if let Some(ref mut selector_position) = selector.position {
+                        *selector_position = selector_position.union(&end_span);
                     } else {
-                        selector.position = Some(Span(ls, cs, le, ce, id));
+                        selector.position = Some(start_span.union(&end_span));
                     }
                 }
-                Token(CSSToken::HashTag, Span(ls, cs, _, _, _)) => {
-                    let (name, Span(_, _, le, ce, id)) = token_as_ident(reader.next().unwrap())?;
-                    if let Some(_) = selector.identifier.replace(name) {
+                Token(CSSToken::HashPrefixedValue(identifier), position) => {
+                    if selector.identifier.replace(identifier).is_some() {
                         return Err(ParseError {
                             reason: "Cannot specify to id selectors".to_owned(),
-                            position: Span(ls, cs, le, ce, id),
+                            position,
                         });
                     }
-                    if let Some(Span(_, _, ref mut ole, ref mut oce, _)) = &mut selector.position {
-                        *ole = le;
-                        *oce = ce;
+                    if let Some(ref mut selector_position) = selector.position {
+                        *selector_position = selector_position.union(&position);
                     } else {
-                        selector.position = Some(Span(ls, cs, le, ce, id));
+                        selector.position = Some(position);
                     }
                 }
                 Token(CSSToken::CloseAngle, position) => {
                     let child = Self::from_reader(reader)?;
-                    if let Some(Span(_, _, ref mut ole, ref mut oce, _)) = &mut selector.position {
-                        *ole = child.get_position().unwrap().2;
-                        *oce = child.get_position().unwrap().3;
+                    if let Some(ref mut selector_position) = selector.position {
+                        *selector_position = selector_position.union(&position);
                     } else {
                         return Err(ParseError {
                             reason: "Expected selector start, found '>'".to_owned(),

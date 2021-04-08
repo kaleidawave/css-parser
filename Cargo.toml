@@ -15,3 +15,4 @@ path = "src/bin.rs"
 [dependencies]
 console = "0.14.0"
 tokenizer-lib = "0.4.1"
+lazy_static = "1.4.0"

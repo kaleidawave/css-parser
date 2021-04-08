@@ -1,4 +1,4 @@
-use super::SOURCE_IDS;
+use super::{SOURCE_IDS, SourceId};
 use std::collections::HashMap;
 
 const BASE64_ALPHABET: &'static [u8; 64] =
@@ -40,7 +40,7 @@ pub struct SourceMap {
     last_source_column: isize,
     sources: Vec<(String, Option<String>)>,
     /// Maps source ids to position in sources vector
-    sources_map: HashMap<u8, u8>,
+    sources_map: HashMap<SourceId, u8>,
 }
 
 impl SourceMap {
@@ -59,7 +59,7 @@ impl SourceMap {
     }
 
     /// Original line and original column are one indexed
-    pub fn add_mapping(&mut self, original_line: usize, original_column: usize, source_id: u8) {
+    pub fn add_mapping(&mut self, original_line: usize, original_column: usize, source_id: SourceId) {
         if let Some(ref mut last_line) = self.last_line {
             if *last_line == self.line {
                 self.buf.push(',');
@@ -77,7 +77,7 @@ impl SourceMap {
             vlq_encode_integer_to_buffer(buf, *idx as isize);
         } else {
             // Else get it from the global
-            let source_name = SOURCE_IDS.with(|s| s.borrow().get(&source_id).unwrap().clone());
+            let source_name = SOURCE_IDS.read().unwrap().get(&source_id).unwrap().clone();
             // And add it to the map
             self.sources.push(source_name);
             let idx = (self.sources.len() - 1) as u8;

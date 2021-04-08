@@ -20,6 +20,7 @@ name = "css-parser"
 version = "0.0.0"
 dependencies = [
  "console",
+ "lazy_static",
  "tokenizer-lib",
 ]
 
