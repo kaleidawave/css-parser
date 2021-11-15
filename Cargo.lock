@@ -193,6 +193,8 @@ dependencies = [
 [[package]]
 name = "source-map"
 version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d434724971b53d549496d2034dde24612af0f11318cf8a99370a811f3cade881"
 dependencies = [
  "lazy_static",
 ]
