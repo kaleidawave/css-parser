@@ -1,42 +1,102 @@
-use css_parser::{raise_rules, ASTNode, StyleSheet, ToStringSettings};
-use std::{env, path::PathBuf, fs};
+use std::{fs, path::PathBuf};
+
+use argh::FromArgs;
+use codespan_reporting::{
+    diagnostic::{Diagnostic, Label},
+    files::SimpleFiles,
+    term::{
+        emit,
+        termcolor::{ColorChoice, StandardStream},
+    },
+};
+use css_parser::{raise_nested_rules, ParseError, StyleSheet, ToStringSettings};
+
+#[derive(FromArgs, Debug)]
+/// A css parser/compiler
+struct TopLevel {
+    #[argh(subcommand)]
+    nested: CSSParserSubCommand,
+}
+
+#[derive(FromArgs, Debug)]
+#[argh(subcommand)]
+enum CSSParserSubCommand {
+    Info(Info),
+    Build(BuildArguments),
+}
+
+/// Display info
+#[derive(FromArgs, Debug)]
+#[argh(subcommand, name = "info")]
+struct Info {}
+
+/// Build arguments
+#[derive(FromArgs, PartialEq, Debug)]
+#[argh(subcommand, name = "build")]
+struct BuildArguments {
+    /// path to input file
+    #[argh(positional)]
+    input: PathBuf,
+    /// path to output
+    #[argh(positional)]
+    output: PathBuf,
+
+    /// whether to minify build output
+    #[argh(switch, short = 'm')]
+    minify: bool,
+    /// build source maps
+    #[argh(switch)]
+    source_maps: bool,
+}
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let args: TopLevel = argh::from_env();
+    match args.nested {
+        CSSParserSubCommand::Info(_) => {
+            println!("CSS Parser: CSS and SCSS compiler");
+            println!("   Version: {}", env!("CARGO_PKG_VERSION"));
+            println!("Repository: {}", env!("CARGO_PKG_REPOSITORY"));
+        }
+        CSSParserSubCommand::Build(build) => {
+            let res = StyleSheet::from_path(build.input);
+            match res {
+                Ok(mut stylesheet) => {
+                    raise_nested_rules(&mut stylesheet);
 
-    if args.len() == 1 {
-        println!(
-            r#"Info:
-{} {}
-Usage:
-./css-parser index.css out.css
-Flags:
---source-map Builds a source map
---minify     Minifies output"#,
-            env!("CARGO_PKG_NAME"),
-            env!("CARGO_PKG_VERSION")
-        );
-        return;
+                    let settings = if build.minify {
+                        ToStringSettings::minified()
+                    } else {
+                        ToStringSettings::default()
+                    };
+
+                    let output = if build.source_maps {
+                        let (output, source_map) =
+                            stylesheet.to_string_with_source_map(Some(settings));
+                        let prefix = "sourceMappingURL=data:application/json;base64,";
+                        // Append inline comment
+                        format!("{}\n/*# {}{}*/", output, prefix, base64::encode(source_map))
+                    } else {
+                        stylesheet.to_string(Some(settings))
+                    };
+                    fs::write(build.output.as_path(), output).unwrap();
+                    println!("Wrote '{}'", build.output.display());
+                }
+                Err(err) => {
+                    let ParseError { position, reason } = err;
+
+                    let mut files = SimpleFiles::new();
+                    let (filename, file_content) = position.source_id.get_file().unwrap();
+                    let file_id = files.add(filename.to_str().unwrap().to_owned(), file_content);
+
+                    let diagnostic = Diagnostic::error()
+                        .with_labels(vec![Label::primary(file_id, position).with_message(&reason)]);
+
+                    let writer = StandardStream::stderr(ColorChoice::Always);
+                    let config = codespan_reporting::term::Config::default();
+
+                    emit(&mut writer.lock(), &config, &files, &diagnostic).unwrap();
+                }
+            }
+        }
     }
-
-    let minify = args.contains(&"--minify".to_owned());
-    let generate_source_map = args.contains(&"--source-map".to_owned());
-    let current_dir: PathBuf = env::current_dir().unwrap().into();
-    let source_file = current_dir.join(args.get(1).unwrap());
-    let output_file = current_dir.join(args.get(2).unwrap());
-
-    let mut style_sheet = StyleSheet::from_path(&source_file, args.get(1).unwrap()).unwrap();
-    raise_rules(&mut style_sheet);
-    let stringify_settings = ToStringSettings {
-        minify, generate_source_map, indent_with: "    ".to_owned()
-    };
-    let (mut output, source_map) = style_sheet.to_string(&stringify_settings);
-
-    if let Some(source_map) = source_map {
-        // Add the source map comment:
-        output.push_str(&format!("/*# sourceMappingURL={}.map*/", args.get(2).unwrap()));
-        fs::write(output_file.with_extension("css.map"), source_map.to_string()).unwrap();
-    }
-    fs::write(output_file, output).unwrap();
-    println!("Compiled out {} to {}", args.get(1).unwrap(), args.get(2).unwrap());
 }

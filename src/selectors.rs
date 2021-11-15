@@ -1,5 +1,5 @@
-use super::{token_as_ident, ASTNode, CSSToken, ParseError, Span, ToStringSettings, ToStringer};
-use std::boxed::Box;
+use super::{token_as_ident, ASTNode, CSSToken, ParseError, Span, ToStringSettings};
+use source_map::ToString;
 use tokenizer_lib::{Token, TokenReader};
 
 /// [A css selector](https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_Selectors)
@@ -30,14 +30,21 @@ impl ASTNode for Selector {
         };
         for i in 0.. {
             // Handling "descendant" parsing by checking gap/space in tokens
-            let peek = reader.peek().unwrap();
+            let Token(peek_token, peek_span) = reader.peek().unwrap();
+
+            if matches!(peek_token, CSSToken::Comma) {
+                return Ok(selector);
+            }
+
             if i != 0
-                && peek.0 != CSSToken::CloseAngle
-                && !selector.position.as_ref().unwrap().is_adjacent(&peek.1)
+                && !matches!(peek_token, CSSToken::CloseAngle)
+                && !selector
+                    .position
+                    .as_ref()
+                    .unwrap()
+                    .is_adjacent_to(peek_span)
             {
                 let descendant = Self::from_reader(reader)?;
-                selector.position.as_mut().unwrap().2 = descendant.get_position().unwrap().2;
-                selector.position.as_mut().unwrap().3 = descendant.get_position().unwrap().3;
                 selector.descendant = Some(Box::new(descendant));
                 break;
             }
@@ -61,11 +68,11 @@ impl ASTNode for Selector {
                     selector.position = Some(pos);
                 }
                 Token(CSSToken::Dot, start_span) => {
-                    let (name, end_span) = token_as_ident(reader.next().unwrap())?;
+                    let (class_name, end_span) = token_as_ident(reader.next().unwrap())?;
                     selector
                         .class_names
                         .get_or_insert_with(|| Vec::new())
-                        .push(name);
+                        .push(class_name);
                     if let Some(ref mut selector_position) = selector.position {
                         *selector_position = selector_position.union(&end_span);
                     } else {
@@ -100,7 +107,7 @@ impl ASTNode for Selector {
                 }
                 Token(token, position) => {
                     return Err(ParseError {
-                        reason: format!("Expected valid selector '{:?}'", token),
+                        reason: format!("Expected valid selector found '{:?}'", token),
                         position,
                     });
                 }
@@ -117,13 +124,14 @@ impl ASTNode for Selector {
 
     fn to_string_from_buffer(
         &self,
-        buf: &mut ToStringer<'_>,
+        buf: &mut impl ToString,
         settings: &ToStringSettings,
         depth: u8,
     ) {
-        if let Some(pos) = &self.position {
-            buf.add_mapping(pos.0, pos.1, pos.4);
+        if let Some(ref pos) = self.position {
+            buf.add_mapping(pos);
         }
+
         if let Some(name) = &self.tag_name {
             buf.push_str(name);
         }
@@ -179,44 +187,88 @@ impl Selector {
 
 #[cfg(test)]
 mod selector_tests {
+    use source_map::SourceId;
+
     use super::*;
+
+    const NULL_SOURCE_ID: SourceId = SourceId::null();
 
     #[test]
     fn tag_name() {
-        let selector = Selector::from_string("h1".to_owned()).unwrap();
-        assert_eq!(selector.tag_name, Some("h1".to_owned()));
+        let selector = Selector::from_string("h1".to_owned(), NULL_SOURCE_ID, None).unwrap();
+        assert_eq!(
+            selector.tag_name,
+            Some("h1".to_owned()),
+            "Bad selector {:?}",
+            selector
+        );
     }
 
     #[test]
     fn id() {
-        let selector = Selector::from_string("#button1".to_owned()).unwrap();
-        assert_eq!(selector.identifier, Some("button1".to_owned()));
+        let selector = Selector::from_string("#button1".to_owned(), NULL_SOURCE_ID, None).unwrap();
+        assert_eq!(
+            selector.identifier,
+            Some("button1".to_owned()),
+            "Bad selector {:?}",
+            selector
+        );
     }
 
     #[test]
     fn class_name() {
-        let selector1 = Selector::from_string(".container".to_owned()).unwrap();
-        assert_eq!(selector1.class_names.unwrap()[0], "container".to_owned());
-        let selector2 = Selector::from_string(".container.center-x".to_owned()).unwrap();
-        assert_eq!(selector2.class_names.unwrap().len(), 2);
+        let selector1 =
+            Selector::from_string(".container".to_owned(), NULL_SOURCE_ID, None).unwrap();
+        assert_eq!(
+            selector1.class_names.as_ref().unwrap()[0],
+            "container".to_owned(),
+            "Bad selector {:?}",
+            selector1
+        );
+        let selector2 =
+            Selector::from_string(".container.center-x".to_owned(), NULL_SOURCE_ID, None).unwrap();
+        assert_eq!(
+            selector2.class_names.as_ref().unwrap().len(),
+            2,
+            "Bad selector {:?}",
+            selector2
+        );
     }
 
     #[test]
     fn descendant() {
-        let selector = Selector::from_string("div .button".to_owned()).unwrap();
-        assert_eq!(selector.tag_name, Some("div".to_owned()));
+        let selector =
+            Selector::from_string("div .button".to_owned(), NULL_SOURCE_ID, None).unwrap();
+        assert_eq!(
+            selector.tag_name,
+            Some("div".to_owned()),
+            "Bad selector {:?}",
+            selector
+        );
         let descendant_selector = *selector.descendant.unwrap();
         assert_eq!(
-            descendant_selector.class_names.unwrap()[0],
-            "button".to_owned()
+            descendant_selector.class_names.as_ref().unwrap()[0],
+            "button".to_owned(),
+            "Bad selector {:?}",
+            descendant_selector
         );
     }
 
     #[test]
     fn child() {
-        let selector = Selector::from_string("div > h1".to_owned()).unwrap();
-        assert_eq!(selector.tag_name, Some("div".to_owned()));
+        let selector = Selector::from_string("div > h1".to_owned(), NULL_SOURCE_ID, None).unwrap();
+        assert_eq!(
+            selector.tag_name,
+            Some("div".to_owned()),
+            "Bad selector {:?}",
+            selector
+        );
         let child_selector = *selector.child.unwrap();
-        assert_eq!(child_selector.tag_name, Some("h1".to_owned()));
+        assert_eq!(
+            child_selector.tag_name,
+            Some("h1".to_owned()),
+            "Bad selector {:?}",
+            child_selector
+        );
     }
 }

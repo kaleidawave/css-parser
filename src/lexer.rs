@@ -1,11 +1,13 @@
-use super::{ParseError, SourceId, Span};
+use source_map::{SourceId, Span};
 use tokenizer_lib::{Token, TokenSender};
+
+use crate::ParseError;
 
 #[derive(PartialEq, Eq, Debug)]
 pub enum CSSToken {
     Ident(String),
     Comment(String),
-    /// HashPrefixedValue. Is a separate member to prevent lexing #0f5421 as a number. 
+    /// HashPrefixedValue. Is a separate member to prevent lexing #0f5421 as a number.
     /// e.g #my-idx, #ffffff
     HashPrefixedValue(String),
     /// e.g 42
@@ -27,14 +29,13 @@ pub enum CSSToken {
     EOS,
 }
 
-const LINE_START: usize = 1;
-const COLUMN_START: usize = 0;
-
 /// Lexes the source returning CSSToken sequence
+/// byte_offset marks spans
 pub fn lex_source(
-    source: &String,
-    source_id: SourceId,
+    source: &str,
     sender: &mut impl TokenSender<CSSToken, Span>,
+    source_id: SourceId,
+    start_offset: Option<usize>,
 ) -> Result<(), ParseError> {
     #[derive(PartialEq)]
     enum ParsingState {
@@ -42,46 +43,46 @@ pub fn lex_source(
         Number,
         /// Used to decide whether class identifier or number
         Dot,
-        String { escaped: bool },
+        String {
+            escaped: bool,
+        },
         HashPrefixedValue,
-        Comment { found_asterisk: bool },
+        Comment {
+            found_asterisk: bool,
+        },
         None,
     }
 
     let mut state = ParsingState::None;
 
-    // Used for the position of tokens. Line is one based, column is 0 based
-    let mut line_start = LINE_START;
-    let mut line_end = line_start;
-    let mut column_start = COLUMN_START;
-    let mut column_end = column_start;
-
-    macro_rules! current_position {
-        () => {
-            Span(line_start, column_start, line_end, column_end, source_id)
-        };
-    }
-
     // Used for getting string slices from source
     let mut start = 0;
+    let start_offset = start_offset.unwrap_or_default();
 
     for (idx, chr) in source.char_indices() {
         macro_rules! set_state {
             ($s:expr) => {{
                 start = idx;
-                line_start = line_end;
-                column_start = column_end;
                 state = $s;
             }};
         }
 
         macro_rules! push_token {
             ($t:expr) => {{
-                sender.push(Token(
-                    $t,
-                    current_position!(),
-                ));
+                if !sender.push(Token($t, current_position!())) {
+                    return Ok(());
+                };
             }};
+        }
+
+        macro_rules! current_position {
+            () => {
+                Span {
+                    start: start_offset + start,
+                    end: idx,
+                    source_id,
+                }
+            };
         }
 
         match state {
@@ -91,14 +92,16 @@ pub fn lex_source(
                     push_token!(CSSToken::Ident(source[start..idx].to_owned()));
                     set_state!(ParsingState::None);
                 }
-            }
+            },
             ParsingState::HashPrefixedValue => match chr {
                 'A'..='Z' | 'a'..='z' | '0'..='9' | '-' => {}
                 _ => {
-                    push_token!(CSSToken::HashPrefixedValue(source[(start+1)..idx].to_owned()));
+                    push_token!(CSSToken::HashPrefixedValue(
+                        source[(start + 1)..idx].to_owned()
+                    ));
                     set_state!(ParsingState::None);
                 }
-            }
+            },
             ParsingState::Dot => {
                 if matches!(chr, '0'..='9') {
                     state = ParsingState::Number;
@@ -113,23 +116,22 @@ pub fn lex_source(
                     push_token!(CSSToken::Number(source[start..idx].to_owned()));
                     set_state!(ParsingState::None);
                 }
-            }
+            },
             ParsingState::String { ref mut escaped } => match chr {
-                '\\' => { 
+                '\\' => {
                     *escaped = true;
                 }
                 '"' if !*escaped => {
-                    push_token!(CSSToken::String(source[start..idx].to_owned()));
+                    push_token!(CSSToken::String(source[(start + 1)..idx].to_owned()));
                     set_state!(ParsingState::None);
                     continue;
                 }
-                _ => { *escaped = false }
-            }
+                _ => *escaped = false,
+            },
             ParsingState::Comment {
                 ref mut found_asterisk,
             } => match chr {
                 '/' if *found_asterisk => {
-                    column_end += 1;
                     push_token!(CSSToken::Comment(source[(start + 2)..(idx - 1)].to_owned()));
                     set_state!(ParsingState::None);
                     continue;
@@ -148,17 +150,10 @@ pub fn lex_source(
                     found_asterisk: true
                 }),
                 '.' => set_state!(ParsingState::Dot),
-                '"' => set_state!(ParsingState::String { escaped: false} ),
+                '"' => set_state!(ParsingState::String { escaped: false }),
                 '#' => set_state!(ParsingState::HashPrefixedValue),
                 '0'..='9' => set_state!(ParsingState::Number),
                 chr if chr.is_whitespace() => {
-                    if chr == '\n' {
-                        line_end += 1;
-                        column_end = COLUMN_START;
-                    } else {
-                        column_end += chr.len_utf16();
-                        column_start = column_end;
-                    }
                     continue;
                 }
                 chr => {
@@ -181,68 +176,87 @@ pub fn lex_source(
                             })
                         }
                     };
-                    // TODO this handles that this is not a state:
-                    line_start = line_end;
-                    column_start = column_end;
-                    column_end += chr.len_utf16();
+                    start = idx;
                     push_token!(token);
                     continue;
                 }
             }
         }
-
-        if chr == '\n' {
-            line_end += 1;
-            column_end = COLUMN_START;
-        } else {
-            column_end += chr.len_utf16();
-        }
     }
+
+    let end_of_source = source.len();
 
     match state {
         ParsingState::Ident => {
             sender.push(Token(
                 CSSToken::Ident(source[start..].to_owned()),
-                current_position!(),
+                Span {
+                    start,
+                    end: end_of_source,
+                    source_id,
+                },
             ));
         }
         ParsingState::Number => {
             sender.push(Token(
                 CSSToken::Number(source[start..].to_owned()),
-                current_position!(),
+                Span {
+                    start,
+                    end: end_of_source,
+                    source_id,
+                },
             ));
         }
         ParsingState::HashPrefixedValue => {
             sender.push(Token(
-                CSSToken::HashPrefixedValue(source[(start+1)..].to_owned()),
-                current_position!(),
+                CSSToken::HashPrefixedValue(source[(start + 1)..].to_owned()),
+                Span {
+                    start,
+                    end: end_of_source,
+                    source_id,
+                },
             ));
         }
         ParsingState::Comment { .. } => {
             return Err(ParseError {
                 reason: "Could not find end to comment".to_owned(),
-                position: current_position!()
+                position: Span {
+                    start,
+                    end: end_of_source,
+                    source_id,
+                },
             })
         }
         ParsingState::String { .. } => {
             return Err(ParseError {
                 reason: "Could not find end to string".to_owned(),
-                position: current_position!()
+                position: Span {
+                    start,
+                    end: end_of_source,
+                    source_id,
+                },
             })
         }
         ParsingState::Dot => {
             return Err(ParseError {
                 reason: "Found trailing \".\"".to_owned(),
-                position: current_position!()
+                position: Span {
+                    start,
+                    end: end_of_source,
+                    source_id,
+                },
             })
         }
         ParsingState::None => {}
-         
     }
 
     sender.push(Token(
         CSSToken::EOS,
-        Span(line_end, column_end, line_end, column_end, source_id),
+        Span {
+            start: end_of_source,
+            end: end_of_source,
+            source_id,
+        },
     ));
 
     Ok(())

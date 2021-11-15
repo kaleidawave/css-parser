@@ -1,4 +1,5 @@
-use super::{ASTNode, CSSToken, ParseError, Span, ToStringSettings, ToStringer, Token};
+use super::{ASTNode, CSSToken, ParseError, Span, ToStringSettings, Token};
+use source_map::ToString;
 use tokenizer_lib::TokenReader;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -41,7 +42,7 @@ impl ASTNode for CSSValue {
 
     fn to_string_from_buffer(
         &self,
-        buf: &mut ToStringer<'_>,
+        buf: &mut impl ToString,
         settings: &ToStringSettings,
         depth: u8,
     ) {
@@ -68,19 +69,17 @@ impl ASTNode for CSSValue {
                 buf.push_str(&unit);
             }
             Self::List(values) => {
-                let mut iter = values.iter().peekable();
-                while let Some(value) = iter.next() {
+                for (idx, value) in values.iter().enumerate() {
                     value.to_string_from_buffer(buf, settings, depth);
-                    if !settings.minify {
+                    if idx + 1 < values.len() && !settings.minify {
                         buf.push(' ');
                     }
                 }
             }
             Self::CommaSeparatedList(values) => {
-                let mut iter = values.iter().peekable();
-                while let Some(value) = iter.next() {
+                for (idx, value) in values.iter().enumerate() {
                     value.to_string_from_buffer(buf, settings, depth);
-                    if iter.peek().is_some() {
+                    if idx + 1 < values.len() {
                         buf.push(',');
                         if !settings.minify {
                             buf.push(' ');
@@ -91,10 +90,9 @@ impl ASTNode for CSSValue {
             Self::Function(func, arguments) => {
                 buf.push_str(&func);
                 buf.push('(');
-                let mut iter = arguments.iter().peekable();
-                while let Some(value) = iter.next() {
+                for (idx, value) in arguments.iter().enumerate() {
                     value.to_string_from_buffer(buf, settings, depth);
-                    if iter.peek().is_some() {
+                    if idx + 1 < arguments.len() {
                         buf.push(',');
                         if !settings.minify {
                             buf.push(' ');
@@ -118,7 +116,7 @@ impl CSSValue {
         match reader.next().unwrap() {
             Token(CSSToken::Ident(ident), start_span) => {
                 let Token(peek_type, peek_span) = reader.peek().unwrap();
-                if *peek_type == CSSToken::OpenBracket && start_span.is_adjacent(peek_span) {
+                if *peek_type == CSSToken::OpenBracket && start_span.is_adjacent_to(peek_span) {
                     reader.next();
                     reader.expect_next(CSSToken::CloseBracket)?;
                     todo!("Functions")
@@ -130,7 +128,7 @@ impl CSSValue {
             Token(CSSToken::Number(number), start_position) => {
                 let Token(peek_type, peek_position) = reader.peek().unwrap();
                 let number = Number(number);
-                if start_position.is_adjacent(peek_position)
+                if start_position.is_adjacent_to(peek_position)
                     && !matches!(peek_type, CSSToken::EOS | CSSToken::SemiColon)
                 {
                     match peek_type {
@@ -146,12 +144,13 @@ impl CSSValue {
                             };
                             Ok(CSSValue::NumberWithUnit(number, unit))
                         }
-                        token_type => panic!("Adjacent {:?}", token_type),
+                        _ => Ok(CSSValue::Number(number)),
                     }
                 } else {
                     Ok(CSSValue::Number(number))
                 }
             }
+            Token(CSSToken::String(string), _) => Ok(CSSValue::StringLiteral(string)),
             Token(token, position) => Err(ParseError {
                 reason: format!("Expected value, found {:?}", token),
                 position,
@@ -160,14 +159,21 @@ impl CSSValue {
     }
 }
 
-mod test {
-    use super::*;
+#[cfg(test)]
+mod css_values_test {
+    use super::{ASTNode, CSSValue, Number};
+    use source_map::SourceId;
+
+    const NULL_SOURCE_ID: SourceId = SourceId::null();
 
     macro_rules! test_value {
         ($test_name:ident, $src:expr, $res:expr) => {
             #[test]
             fn $test_name() {
-                assert_eq!(CSSValue::from_string($src.to_owned()).unwrap(), $res);
+                assert_eq!(
+                    CSSValue::from_string($src.to_owned(), NULL_SOURCE_ID, None).unwrap(),
+                    $res
+                );
             }
         };
     }
@@ -175,7 +181,11 @@ mod test {
     test_value!(keyword, "block", CSSValue::Keyword("block".to_owned()));
     test_value!(color, "#00ff00", CSSValue::Color("00ff00".to_owned()));
     test_value!(number, "1", CSSValue::Number(Number("1".to_owned())));
-    test_value!(number_decimal_shorthand, ".2", CSSValue::Number(Number(".2".to_owned())));
+    test_value!(
+        number_decimal_shorthand,
+        ".2",
+        CSSValue::Number(Number(".2".to_owned()))
+    );
     test_value!(
         percentage,
         "10%",
